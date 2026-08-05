@@ -1,0 +1,1 @@
+{"session_id":"sess-0001","transcript_path":"/tmp/t.jsonl","cwd":"/sandbox/proj","hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":"/sandbox/proj/src/verify.ts"},"tool_response":"     1\tCANARY_READ_CONTENT","tool_use_id":"toolu_r1","duration_ms":3}

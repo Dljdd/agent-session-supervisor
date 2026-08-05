@@ -1,0 +1,1 @@
+{"session_id":"sess-0001","transcript_path":"/tmp/t.jsonl","cwd":"/sandbox/proj","hook_event_name":"PostToolUseFailure","tool_name":"Bash","tool_input":{"command":"npm test","description":"Run tests"},"tool_use_id":"toolu_b2","error":"Command exited with non-zero status code 1","is_interrupt":false,"duration_ms":4187}

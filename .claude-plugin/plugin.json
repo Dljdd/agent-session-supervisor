@@ -1,0 +1,9 @@
+{
+  "name": "supervisor",
+  "version": "0.4.0",
+  "description": "Session flight recorder, stay-awake, quota auto-resume, and cost statusline for Claude Code. Zero model calls, fully local.",
+  "author": { "name": "Dylan Moraes", "url": "https://github.com/dylanmoraes" },
+  "repository": "https://github.com/dylanmoraes/agent-session-supervisor",
+  "license": "MIT",
+  "keywords": ["session", "memory", "recorder", "resume", "statusline", "sleep"]
+}

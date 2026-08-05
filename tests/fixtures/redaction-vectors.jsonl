@@ -1,0 +1,31 @@
+{"name":"sk-key","cmd":"curl -H 'x-key: sk-abc123def456ghi789jkl'","must_not_contain":["sk-abc123def456ghi789jkl"],"may_contain":["[REDACTED"]}
+{"name":"akia","cmd":"aws --key AKIAIOSFODNN7EXAMPLE s3 ls","must_not_contain":["AKIAIOSFODNN7EXAMPLE"],"may_contain":["aws-key-id"]}
+{"name":"bearer","cmd":"curl -H 'Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.payloadpayload.sigsigsig'","must_not_contain":["eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"],"may_contain":["[REDACTED:jwt]"]}
+{"name":"ghp","cmd":"git push https://ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345@github.com/x/y","must_not_contain":["ghp_AbCdEfGhIjKlMnOpQrStUvWxYz012345"],"may_contain":[]}
+{"name":"glpat","cmd":"glab auth login -t glpat-AbCdEfGhIjKlMnOp","must_not_contain":["glpat-AbCdEfGhIjKlMnOp"],"may_contain":[]}
+{"name":"pem-multiline","err":"-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA7bq\nSECRETLINE2\n-----END RSA PRIVATE KEY-----","must_not_contain":["MIIEowIBAAKCAQEA7bq","SECRETLINE2"],"may_contain":["private-key"]}
+{"name":"kv-family","cmd":"password=hunter2secret passwd: x secret=s3cr3t token=tok123 api_key=ak123 api-key: ak456","must_not_contain":["hunter2secret","s3cr3t","tok123","ak123","ak456"],"may_contain":["password","[REDACTED]"]}
+{"name":"hex32-redacts","cmd":"echo 0123456789abcdef0123456789abcdef","must_not_contain":["0123456789abcdef0123456789abcdef"],"may_contain":["high-entropy"]}
+{"name":"hex40-kept","cmd":"git checkout 3f5a2b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6","must_not_contain":[],"may_contain":["3f5a2b8c9d0e1f2a3b4c5d6e7f8091a2b3c4d5e6"]}
+{"name":"hex64-kept","cmd":"echo 3f5a2b8c9d0e1f2a3b4c5d6e7f8091a23f5a2b8c9d0e1f2a3b4c5d6e7f8091a2","must_not_contain":[],"may_contain":["3f5a2b8c9d0e1f2a3b4c5d6e7f8091a23f5a2b8c9d0e1f2a3b4c5d6e7f8091a2"]}
+{"name":"b64-44","cmd":"echo dGhpc0lzQVNlY3JldFZhbHVlMTIzNDU2Nzg5MDEyMzQ1Ng==","must_not_contain":["dGhpc0lzQVNlY3JldFZhbHVlMTIzNDU2Nzg5MDEyMzQ1Ng=="],"may_contain":["high-entropy"]}
+{"name":"json-embedded","cmd":"curl -d '{\"api_key\":\"sk-live-abcdefgh12345678\"}'","must_not_contain":["sk-live-abcdefgh12345678"],"may_contain":[]}
+{"name":"url-creds","cmd":"git clone https://alice:ghp_tok123456789012345678@github.com/x.git","must_not_contain":["ghp_tok123456789012345678"],"may_contain":["alice"]}
+{"name":"query-token","cmd":"curl 'https://api?access_token=ya29.abc123def&x=1'","must_not_contain":["ya29.abc123def"],"may_contain":["access_token"]}
+{"name":"ac6-literal","cmd":"echo \"export API_KEY=sk-abc123def456ghi789jkl\"","must_not_contain":["sk-abc123def456ghi789jkl"],"may_contain":["API_KEY"]}
+{"name":"db-password","cmd":"export DB_PASSWORD=hunter2","must_not_contain":["hunter2"],"may_contain":["DB_PASSWORD"]}
+{"name":"db-password-quoted","cmd":"export DB_PASSWORD=\"correct horse battery staple\"","must_not_contain":["correct horse battery staple"],"may_contain":["DB_PASSWORD"]}
+{"name":"aws-secret","cmd":"export AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY","must_not_contain":["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"],"may_contain":["AWS_SECRET_ACCESS_KEY"]}
+{"name":"pgpassword","cmd":"PGPASSWORD=s3cr3t-prod psql -h db","must_not_contain":["s3cr3t-prod"],"may_contain":["PGPASSWORD"]}
+{"name":"mysql-pwd","cmd":"MYSQL_PWD=Tr0ub4dor mysql -u root","must_not_contain":["Tr0ub4dor"],"may_contain":["MYSQL_PWD"]}
+{"name":"access-token-env","cmd":"export ACCESS_TOKEN=abc123xyz","must_not_contain":["abc123xyz"],"may_contain":["ACCESS_TOKEN"]}
+{"name":"github-token-env","cmd":"GITHUB_TOKEN=gho_shorttok gh pr list","must_not_contain":["gho_shorttok"],"may_contain":["GITHUB_TOKEN"]}
+{"name":"my-secret","cmd":"export MY_SECRET=x","must_not_contain":["MY_SECRET=x"],"may_contain":["MY_SECRET"]}
+{"name":"stripe-live","cmd":"stripe listen --api-key sk_live_51H8xJ2eZvKYlo2C","must_not_contain":["sk_live_51H8xJ2eZvKYlo2C"],"may_contain":["vendor-key"]}
+{"name":"stripe-rk","cmd":"curl -u rk_live_abc123DEF456ghi:","must_not_contain":["rk_live_abc123DEF456ghi"],"may_contain":[]}
+{"name":"slack-webhook","cmd":"curl -X POST https://hooks.slack.com/services/T00000000/B00000000/XXXXXXXX2f4Fd0kJcQ9r","must_not_contain":["T00000000/B00000000/XXXXXXXX2f4Fd0kJcQ9r"],"may_contain":["slack-webhook"]}
+{"name":"sendgrid","cmd":"export SENDGRID_API_KEY=SG.abcdefghij_klmnop.qrstuvwxyz123456789","must_not_contain":["SG.abcdefghij_klmnop.qrstuvwxyz123456789"],"may_contain":["SENDGRID_API_KEY"]}
+{"name":"huggingface","cmd":"huggingface-cli login --token hf_ABCDEFGHIJKLMNOPQRSTuvwx","must_not_contain":["hf_ABCDEFGHIJKLMNOPQRSTuvwx"],"may_contain":[]}
+{"name":"digitalocean","cmd":"doctl auth init -t dop_v1_abcdef0123456789abcdef","must_not_contain":["dop_v1_abcdef0123456789abcdef"],"may_contain":[]}
+{"name":"sigv4","cmd":"curl 'https://s3?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Signature=deadbeef01234567'","must_not_contain":["deadbeef01234567"],"may_contain":["X-Amz-Signature="]}
+{"name":"path-token","path":"/tmp/deploy/ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345.json","must_not_contain":["ghp_aBcDeFgHiJkLmNoPqRsTuVwXyZ012345"],"may_contain":["/tmp/deploy/"]}

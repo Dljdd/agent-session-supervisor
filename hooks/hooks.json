@@ -1,0 +1,65 @@
+{
+  "description": "Agent Session Supervisor: records structural session signals, injects a start-of-session digest, holds a wake lock while the session lives, and schedules opt-in quota-reset resumes.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume|clear",
+        "hooks": [
+          { "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook-session-start.sh",
+            "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit|NotebookEdit|Read|Bash",
+        "hooks": [
+          { "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook-capture.sh",
+            "async": true,
+            "timeout": 10 }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          { "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook-capture.sh",
+            "async": true,
+            "timeout": 10 }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook-stop.sh",
+            "async": true,
+            "timeout": 30 }
+        ]
+      }
+    ],
+    "StopFailure": [
+      {
+        "matcher": "rate_limit",
+        "hooks": [
+          { "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook-stop-failure.sh",
+            "timeout": 10 }
+        ]
+      }
+    ],
+    "SessionEnd": [
+      {
+        "hooks": [
+          { "type": "command",
+            "command": "\"${CLAUDE_PLUGIN_ROOT}\"/scripts/hook-session-end.sh" }
+        ]
+      }
+    ]
+  }
+}

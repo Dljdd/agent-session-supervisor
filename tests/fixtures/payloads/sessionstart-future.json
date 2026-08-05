@@ -1,0 +1,1 @@
+{"session_id":"sess-0001","transcript_path":"/tmp/t.jsonl","cwd":"/sandbox/proj","hook_event_name":"SessionStart","source":"startup","permission_mode":"default","model":{"id":"claude-x","display_name":"Claude"},"session_title":"t","prompt_id":"p1"}
