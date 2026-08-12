@@ -1,0 +1,8 @@
+Last session — 2 hours ago, 16 min
+  Edited src/app.ts ×3
+  Edited src/util.ts
+  FAILED  npm run lint — "lint error: 2 problems"
+  FAILED  npm test — "Command exited with non-zero status code 1"
+  Tests      npm test  red → green
+  REVERTED   src/util.ts — no net change
+  Read ×3   src/config.ts — never edited

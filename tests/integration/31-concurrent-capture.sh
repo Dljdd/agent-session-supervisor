@@ -8,16 +8,30 @@
 # SEC-13). Assert: every marker appears exactly once (no loss, no merge), every
 # line is jq-valid, and the max line BYTE length is <= 4096 for EVERY event kind.
 #
-# Defaults are the strategy's 50 x 20; the "10 consecutive runs" gate is the
-# RUNNER's repetition (strategy §7) — A02_ROUNDS scales internal rounds, and
-# A02_WRITERS/A02_PAYLOADS scale width for a fast smoke run.
+# Width: the DEFAULT is a lean smoke run (16 x 8 = 128 shell-path spawns) sized
+# to sit ~2x under the anti-hang 15s-per-test ceiling even on a slow python3
+# launcher (a pyenv shim, where a full hook is hundreds of ms). 16-way overlap
+# with 128 concurrent appends is still a strong A-02 loss/merge check, and it is
+# the size the whole suite runs — INCLUDING under RELEASE=1, whose only effect in
+# the runner is SKIP->FAIL, NOT a bigger per-test watchdog (still 30s). The
+# strategy's full 50 x 20 = 1000 spawns takes ~50s and therefore cannot fit any
+# per-test watchdog by design; it is an explicit, out-of-suite release
+# validation: opt in with A02_FULL=1 and run this file standalone.
+# A02_WRITERS/A02_PAYLOADS override either default explicitly. The "10
+# consecutive runs" gate is the RUNNER's repetition (strategy §7) — A02_ROUNDS
+# scales internal rounds.
 set -u
 PLUGIN_ROOT=${PLUGIN_ROOT:-$(cd "$(dirname "$0")/../.." && pwd)}
 export PLUGIN_ROOT
 . "$PLUGIN_ROOT/tests/lib.sh"
 
-WRITERS=${A02_WRITERS:-50}
-PAYLOADS=${A02_PAYLOADS:-20}
+if [ "${A02_FULL:-}" = "1" ]; then
+  WRITERS=${A02_WRITERS:-50}
+  PAYLOADS=${A02_PAYLOADS:-20}
+else
+  WRITERS=${A02_WRITERS:-16}
+  PAYLOADS=${A02_PAYLOADS:-8}
+fi
 ROUNDS=${A02_ROUNDS:-1}
 MAX_BYTES=4096   # CT-10 (mirror of scripts/py/supervisor_common.MAX_EVENT_BYTES)
 
@@ -49,13 +63,21 @@ PY
   payload stop                 > "$T/pl/_stop.json"
   payload sessionend-other     > "$T/pl/_end.json"
 
-  # Barrier: every worker blocks on the go-gate so they truly overlap.
-  rm -f "$T/go"
+  # Barrier: every worker blocks on a FIFO read; ONE release write frees them
+  # together so the appends truly overlap — WITHOUT the busy-spin `do :; done`
+  # gate that pinned all 8 cores across 53 subshells and blew the runtime past
+  # the 15s ceiling (INT-01). The parent holds the FIFO open read-write on fd 8
+  # for the whole barrier, so a reader that opens late can never block at open()
+  # after the writer is gone (the classic FIFO-barrier hang). No process sleeps.
+  local GATE="$T/gate"
+  rm -f "$GATE"; mkfifo "$GATE"
+  exec 8<>"$GATE"
   local w
   w=0
   while [ $w -lt "$WRITERS" ]; do
     (
-      while [ ! -f "$T/go" ]; do :; done
+      exec 8>&-              # a child never holds the gate's write end
+      read _ <"$GATE"        # block until release (no CPU spin)
       p=0
       while [ $p -lt "$PAYLOADS" ]; do
         "$PLUGIN_ROOT/scripts/hook-capture.sh" < "$T/pl/w$(printf %03d $w)_p$(printf %03d $p).json"
@@ -65,11 +87,17 @@ PY
     w=$((w+1))
   done
   # Interleave the three snapshot-bearing boundary events.
-  ( while [ ! -f "$T/go" ]; do :; done; "$PLUGIN_ROOT/scripts/hook-capture.sh" --start < "$T/pl/_start.json" ) &
-  ( while [ ! -f "$T/go" ]; do :; done; "$PLUGIN_ROOT/scripts/hook-capture.sh" --stop  < "$T/pl/_stop.json" )  &
-  ( while [ ! -f "$T/go" ]; do :; done; "$PLUGIN_ROOT/scripts/hook-capture.sh" --end   < "$T/pl/_end.json" )   &
-  : > "$T/go"   # release
+  ( exec 8>&-; read _ <"$GATE"; "$PLUGIN_ROOT/scripts/hook-capture.sh" --start < "$T/pl/_start.json" ) &
+  ( exec 8>&-; read _ <"$GATE"; "$PLUGIN_ROOT/scripts/hook-capture.sh" --stop  < "$T/pl/_stop.json" )  &
+  ( exec 8>&-; read _ <"$GATE"; "$PLUGIN_ROOT/scripts/hook-capture.sh" --end   < "$T/pl/_end.json" )   &
+  # Release: one token per waiting reader (WRITERS workers + 3 boundary events).
+  local total i
+  total=$((WRITERS + 3))
+  i=0
+  while [ $i -lt "$total" ]; do echo go; i=$((i+1)); done >&8
   wait
+  exec 8>&-
+  rm -f "$GATE"
 }
 
 r=1

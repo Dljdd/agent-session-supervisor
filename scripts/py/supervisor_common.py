@@ -562,6 +562,348 @@ def estimate_tokens(s: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# resume state machine (v0.3, design 13.5/13.6)
+#
+# Pure data operations on <base>/resume/ (CT-6). The shell orchestrators
+# (hook-stop-failure.sh arms; resume-sleeper.sh fires) call these subcommands
+# so the CT-6 pending schema, the ledger, the mutex, and the wake schedule live
+# in one testable place. Every op resolves the store in HOOK context (CT-12) so
+# the DETACHED sleeper works with only CLAUDE_PLUGIN_DATA (or the test seam) in
+# its inherited environment. The pending/ledger shapes here MUST stay in step
+# with maintain.py (_resume_cleanup/forget) and supervisorctl.sh status.
+# ---------------------------------------------------------------------------
+
+RESUME_PAD = 90                    # CT-7 fixed pad past reset (deterministic, no jitter)
+FRESH_TELEMETRY_S = 6 * 3600       # rate_limits.json validity window (design 13.5)
+SEVEN_DAY_MAX_S = 26 * 3600        # only schedule a 7d reset if it is < 26 h out
+WINDOW_BUCKET_S = 18000            # 5 h ledger buckets when resets_at is unknown
+DEFAULT_LADDER = (1800, 3600, 7200, 14400)   # CT-7: +30/+60/+120/+240 min
+
+
+def _resume_dir(base: str) -> str:
+    return os.path.join(base, "resume")
+
+
+def resume_ladder():
+    """Backoff ladder in seconds. SUPERVISOR_RESUME_LADDER overrides ONLY under
+    SUPERVISOR_TEST_MODE=1 (CT-13); production is always DEFAULT_LADDER."""
+    if os.environ.get("SUPERVISOR_TEST_MODE") == "1":
+        raw = os.environ.get("SUPERVISOR_RESUME_LADDER")
+        if raw:
+            try:
+                vals = [int(x) for x in raw.split(",") if x.strip() != ""]
+                if vals:
+                    return vals
+            except Exception:
+                pass
+    return list(DEFAULT_LADDER)
+
+
+def pid_alive(pid) -> bool:
+    """True iff pid names a live process. Never treats 0/negative as alive
+    (kill(0, ...) would signal the whole group)."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 1:
+        return False
+    try:
+        os.kill(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+
+
+def resume_schedule(base: str, detail: str, now_ts: int):
+    """Choose the wake schedule (design 13.5). Returns
+    (mode, due, window_key, file_due):
+      'epoch'  -> due = resets_at + 90; the sleeper wakes at `due`.
+      'ladder' -> due = None; the sleeper walks its own backoff ladder.
+      'skip'   -> telemetry is fresh but names no usable window: notify, no arm.
+    Primary source is telemetry/rate_limits.json (fresh <=6 h). Fallbacks: an
+    opportunistic 10-digit epoch parsed out of `error_details`, else the ladder
+    (FACTS 1.6: the StopFailure payload has no reset timestamp)."""
+    rl = os.path.join(base, "telemetry", "rate_limits.json")
+    data = None
+    try:
+        with open(rl, "r", encoding="utf-8", errors="replace") as f:
+            data = json.load(f)
+    except Exception:
+        data = None
+    fresh = False
+    if isinstance(data, dict):
+        ts = data.get("ts")
+        if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
+                and -300 <= (now_ts - ts) <= FRESH_TELEMETRY_S):
+            fresh = True
+    if fresh:
+        def _resets(win):
+            w = data.get(win)
+            r = w.get("resets_at") if isinstance(w, dict) else None
+            if isinstance(r, (int, float)) and not isinstance(r, bool):
+                return int(r)
+            return None
+        fr = _resets("five_hour")
+        if fr is not None and fr > now_ts:
+            return ("epoch", fr + RESUME_PAD, str(fr), fr + RESUME_PAD)
+        sr = _resets("seven_day")
+        if sr is not None and now_ts < sr < now_ts + SEVEN_DAY_MAX_S:
+            return ("epoch", sr + RESUME_PAD, str(sr), sr + RESUME_PAD)
+        return ("skip", None, "", None)   # fresh but no window worth a surprise resume
+    m = re.search(r"resets?[ _-]?at[^0-9]*([0-9]{10})", detail or "")
+    if m:
+        r = int(m.group(1))
+        if r > now_ts:
+            return ("epoch", r + RESUME_PAD, str(r), r + RESUME_PAD)
+    ladder = resume_ladder()
+    return ("ladder", None, str(now_ts // WINDOW_BUCKET_S), now_ts + ladder[0])
+
+
+def _kv(args):
+    """Parse a flat `--key value` / bare `--flag` argv into a dict. A flag with
+    no following value (or whose next token is itself a --flag) maps to 'true'."""
+    out = {}
+    i = 0
+    n = len(args)
+    while i < n:
+        a = args[i]
+        if a.startswith("--"):
+            k = a[2:]
+            if i + 1 < n and not args[i + 1].startswith("--"):
+                out[k] = args[i + 1]
+                i += 2
+            else:
+                out[k] = "true"
+                i += 1
+        else:
+            i += 1
+    return out
+
+
+def _resume_base_or(exc_code):
+    """data_dir(for_hook=True) or None; callers map None to their own exit."""
+    try:
+        return data_dir(for_hook=True)
+    except Exception:
+        return None
+
+
+def _cmd_resume_arm_check() -> int:
+    """exit 0 = clear to arm; 3 = a live sleeper is already armed (or no store)."""
+    base = _resume_base_or(3)
+    if base is None:
+        return 3
+    pend = os.path.join(_resume_dir(base), "pending")
+    try:
+        names = os.listdir(pend)
+    except OSError:
+        return 0
+    for name in names:
+        if not name.endswith(".json"):
+            continue
+        try:
+            with open(os.path.join(pend, name), "r", encoding="utf-8",
+                      errors="replace") as f:
+                obj = json.load(f)
+            if isinstance(obj, dict) and pid_alive(obj.get("pid")):
+                return 3
+        except Exception:
+            continue
+    return 0
+
+
+def _cmd_resume_schedule() -> int:
+    base = _resume_base_or(1)
+    if base is None:
+        return 1
+    try:
+        detail = sys.stdin.read()
+    except Exception:
+        detail = ""
+    mode, due, wkey, file_due = resume_schedule(base, detail, now())
+    if mode == "skip":
+        sys.stdout.write("MODE=skip\n")
+        return 0
+    due_arg = "ladder" if mode == "ladder" else str(due)
+    sys.stdout.write("MODE=%s DUE=%s WKEY=%s FILEDUE=%s\n"
+                     % (mode, due_arg, wkey, file_due))
+    return 0
+
+
+def _cmd_resume_write_pending(args) -> int:
+    opts = _kv(args)
+    base = _resume_base_or(1)
+    if base is None:
+        return 1
+    try:
+        pend = os.path.join(_resume_dir(base), "pending")
+        os.makedirs(pend, mode=0o700, exist_ok=True)
+        s = safe_sid(opts.get("session", ""))
+        obj = {
+            "v": 1,
+            "pid": int(opts.get("pid", "0") or 0),
+            "due": int(opts.get("due", "0") or 0),
+            "session": s,
+            "cwd": opts.get("cwd", ""),
+            "created": now(),
+            "window_key": opts.get("wkey", ""),
+            "attempt": int(opts.get("attempt", "1") or 1),
+        }
+        path = os.path.join(pend, s + ".json")
+        atomic_write(path, json.dumps(obj, separators=(",", ":")) + "\n")
+        sys.stdout.write(path + "\n")
+        return 0
+    except Exception:
+        return 1
+
+
+def _cmd_resume_acquire_lock(args) -> int:
+    """exit 0 = mutex acquired; 3 = another sleeper holds it (design 13.6.3)."""
+    opts = _kv(args)
+    base = _resume_base_or(3)
+    if base is None:
+        return 3
+    rdir = _resume_dir(base)
+    try:
+        os.makedirs(rdir, mode=0o700, exist_ok=True)
+    except OSError:
+        return 3
+    lock = os.path.join(rdir, "attempt.lock")
+    try:
+        mm = float(opts.get("max-minutes", "30") or 30)
+    except ValueError:
+        mm = 30.0
+    # Break a stale lock (design U7.5): staleness is REAL elapsed time vs the
+    # file mtime, never the SUPERVISOR_NOW seam (which can sit years off).
+    try:
+        if os.path.exists(lock) and (time.time() - os.path.getmtime(lock)) > (mm + 5) * 60:
+            os.unlink(lock)
+    except OSError:
+        pass
+    try:
+        fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+    except (FileExistsError, OSError):
+        return 3
+    try:
+        os.write(fd, ("%d %d\n" % (os.getpid(), now())).encode())
+    finally:
+        os.close(fd)
+    return 0
+
+
+def _cmd_resume_release_lock() -> int:
+    base = _resume_base_or(0)
+    if base is None:
+        return 0
+    try:
+        os.unlink(os.path.join(_resume_dir(base), "attempt.lock"))
+    except OSError:
+        pass
+    return 0
+
+
+def _cmd_resume_window_check(args) -> int:
+    """exit 0 = proceed; 3 = a successful resume already covers this window or
+    fell inside the min-gap fuse (design 13.6.3)."""
+    opts = _kv(args)
+    wkey = opts.get("wkey", "")
+    try:
+        gap_h = float(opts.get("min-gap-hours", "5") or 5)
+    except ValueError:
+        gap_h = 5.0
+    base = _resume_base_or(3)
+    if base is None:
+        return 3
+    state = os.path.join(_resume_dir(base), "state.json")
+    attempts = []
+    try:
+        with open(state, "r", encoding="utf-8", errors="replace") as f:
+            obj = json.load(f)
+        if isinstance(obj, dict) and isinstance(obj.get("attempts"), list):
+            attempts = obj["attempts"]
+    except Exception:
+        attempts = []
+    now_ts = now()
+    for a in attempts:
+        if not isinstance(a, dict) or not a.get("ok"):
+            continue
+        if wkey != "" and str(a.get("window_key", "")) == wkey:
+            return 3
+        ts = a.get("ts", 0)
+        if (isinstance(ts, (int, float)) and not isinstance(ts, bool)
+                and (now_ts - ts) < gap_h * 3600):
+            return 3
+    return 0
+
+
+def _cmd_resume_ledger(args) -> int:
+    opts = _kv(args)
+    base = _resume_base_or(1)
+    if base is None:
+        return 1
+    rdir = _resume_dir(base)
+    try:
+        os.makedirs(rdir, mode=0o700, exist_ok=True)
+    except OSError:
+        return 1
+    state = os.path.join(rdir, "state.json")
+    obj = {"v": 1, "attempts": []}
+    try:
+        with open(state, "r", encoding="utf-8", errors="replace") as f:
+            cur = json.load(f)
+        if isinstance(cur, dict) and isinstance(cur.get("attempts"), list):
+            obj = cur
+    except Exception:
+        obj = {"v": 1, "attempts": []}
+    entry = {
+        "ts": now(),
+        "ok": (opts.get("ok", "false") == "true"),
+        "window_key": opts.get("wkey", ""),
+        "session": safe_sid(opts.get("session", "")),
+        "attempt": int(opts.get("attempt", "1") or 1),
+    }
+    if opts.get("fatal") == "true":
+        entry["fatal"] = True
+    if opts.get("reason"):
+        entry["reason"] = opts.get("reason")
+    obj.setdefault("attempts", []).append(entry)
+    try:
+        atomic_write(state, json.dumps(obj, separators=(",", ":")) + "\n")
+        return 0
+    except Exception:
+        return 1
+
+
+def _cmd_resume_config() -> int:
+    """Print the three resume knobs in one eval-able line, so the sleeper reads
+    config with ONE python spawn instead of three (per-fire latency, and every
+    subprocess counts on a slow interpreter)."""
+    cfg = load_config()
+    ma = cfg.get("resume_max_attempts", 4)
+    mg = cfg.get("resume_min_gap_hours", 5)
+    mm = cfg.get("resume_max_minutes", 30)
+    sys.stdout.write("MAXATT=%s MINGAP=%s MAXMIN=%s\n" % (_fmt(ma), _fmt(mg), _fmt(mm)))
+    return 0
+
+
+def _cmd_resume_event(args) -> int:
+    opts = _kv(args)
+    try:
+        pdir = project_dir(opts.get("cwd", ""), for_hook=True)
+        append_event(os.path.join(pdir, "events.jsonl"),
+                     {"v": 1, "ts": now(), "s": safe_sid(opts.get("session", "")),
+                      "k": "resume"})
+        return 0
+    except Exception:
+        return 1
+
+
+# ---------------------------------------------------------------------------
 # CLI (for guard.sh sup_cfg, hook entrypoints, supervisorctl, tests)
 # ---------------------------------------------------------------------------
 
@@ -586,7 +928,16 @@ def _cmd_stdin_vars() -> int:
         sid = safe_sid(str(payload.get("session_id") or ""))
         src = str(payload.get("source") or "")
         cwd = str(payload.get("cwd") or "")
-        sys.stdout.write("SID=%s SRC=%s CWD=%s\n" % (_sq(sid), _sq(src), _sq(cwd)))
+        line = "SID=%s SRC=%s CWD=%s" % (_sq(sid), _sq(src), _sq(cwd))
+        # StopFailure carries `error`/`error_details`; expose them for
+        # hook-stop-failure.sh (design 13.5). The keys are ABSENT on
+        # SessionStart/Stop payloads, so the plain SID/SRC/CWD line stays
+        # byte-identical there (test_common.test_stdin_vars_plain).
+        if "error" in payload:
+            err = str(payload.get("error") or "")
+            detail = str(payload.get("error_details") or "")
+            line += " ERR=%s DETAIL=%s" % (_sq(err), _sq(detail))
+        sys.stdout.write(line + "\n")
     except Exception:
         pass  # silent: hooks treat missing vars as "skip"
     return 0
@@ -625,6 +976,29 @@ def main(argv=None) -> int:
         return 0
     if cmd == "stdin-vars":
         return _cmd_stdin_vars()
+    if cmd == "safe-sid":
+        if len(args) != 1:
+            return 2
+        sys.stdout.write(safe_sid(args[0]) + "\n")
+        return 0
+    if cmd == "resume-arm-check":
+        return _cmd_resume_arm_check()
+    if cmd == "resume-schedule":
+        return _cmd_resume_schedule()
+    if cmd == "resume-write-pending":
+        return _cmd_resume_write_pending(args)
+    if cmd == "resume-acquire-lock":
+        return _cmd_resume_acquire_lock(args)
+    if cmd == "resume-release-lock":
+        return _cmd_resume_release_lock()
+    if cmd == "resume-window-check":
+        return _cmd_resume_window_check(args)
+    if cmd == "resume-ledger":
+        return _cmd_resume_ledger(args)
+    if cmd == "resume-config":
+        return _cmd_resume_config()
+    if cmd == "resume-event":
+        return _cmd_resume_event(args)
     if cmd == "config-list":
         try:
             sys.stdout.write(
