@@ -319,6 +319,34 @@ class TestDataDir(Base):
         finally:
             os.chdir(old)
 
+    def test_containment_exempts_claude_home_when_home_is_git_repo(self):
+        # Regression (live bug): on a machine where $HOME is itself a git repo
+        # (a user who version-controls their home dotfiles), the plugin's own
+        # canonical data root ~/.claude/plugins/data/... was refused, breaking
+        # /supervisor:recap|log|forget|status with "refused data dir".
+        git("init", cwd=self.home)  # HOME is now a git worktree
+        data = os.path.join(self.home, ".claude", "plugins", "data", "supervisor-inline")
+        os.makedirs(data, exist_ok=True)
+        self.assertTrue(
+            sc.containment_ok(data),
+            "canonical ~/.claude data dir must be allowed even when $HOME is a git repo")
+        # a not-yet-created child under it is also allowed (exempt ancestor)
+        self.assertTrue(sc.containment_ok(os.path.join(data, "projects", "abc123")))
+        # SEC-06 preserved: a NON-.claude dir inside the same git worktree is still refused
+        other = os.path.join(self.home, "notclaude", "store")
+        os.makedirs(other, exist_ok=True)
+        self.assertFalse(
+            sc.containment_ok(other),
+            "a non-.claude dir inside a git worktree must still be refused (SEC-06)")
+        # SEC-06 core preserved: CLAUDE_PROJECT_DIR refusal wins even under ~/.claude
+        proj = os.path.join(self.home, ".claude", "proj")
+        os.makedirs(proj, exist_ok=True)
+        os.environ["CLAUDE_PROJECT_DIR"] = proj
+        try:
+            self.assertFalse(sc.containment_ok(os.path.join(proj, "store")))
+        finally:
+            del os.environ["CLAUDE_PROJECT_DIR"]
+
 
 class TestConfig(Base):
     def test_defaults_when_no_file(self):
