@@ -20,6 +20,35 @@ after which `/reload-plugins` (or a relaunch) makes hooks live.
 
 ---
 
+## Verified so far (0.4.1, 2026-08-13)
+
+Confirmed in real `claude --plugin-dir` sessions on macOS 15:
+
+- **1 inject round-trip** — a fresh session recalled the prior session's edits and
+  failed command from the injected digest, with no file reads.
+- **2 /clear** — matcher is `startup|resume|clear`; clear re-injects, compact does not.
+- **3 async latency** — 35 back-to-back reads captured, no slowdown.
+- **4 skills** — `/supervisor:recap` prints the digest live.
+- **5 sleep prevention** — a real `caffeinate` `PreventUserIdleSystemSleep`
+  assertion appeared, tied to the `claude` pid, and released on exit.
+- **6 crash recovery** — a genuine `kill -9` left no `SessionEnd`; the next start
+  appended a synthetic end (`inf:1`) and rebuilt a correct digest. The 30-minute
+  idle rule correctly withholds a rebuild until the crashed run is confirmed dead.
+- **7 auto-resume (safety only)** — the opt-in gate holds: a rate-limit stop arms
+  nothing by default; after explicit opt-in it arms exactly one bounded, deduped
+  resume. The real 5-hour rate-limit **trigger** is still unforced (below).
+- **8 statusline installer** — idempotent, `0600` timestamped backup, unrelated
+  keys preserved, a pre-existing statusLine backed up rather than clobbered.
+- **9 first-run disclosure** — the one-time capture notice appears on a fresh data
+  dir and never again.
+
+Still pending, environment-bound: a real 5-hour rate-limit **trigger** (step 7's
+live fire), interactive `/reload-plugins` (step 10), and a real
+marketplace-install data-dir split (step 11). Run those below and record what you
+see.
+
+---
+
 ## 0. Prerequisite: authenticate
 
 OAuth on the build machine may be expired. Run `claude`, complete login. Every

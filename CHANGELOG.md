@@ -3,6 +3,41 @@
 All notable changes to this plugin are recorded here. This project adheres to
 semantic versioning.
 
+## 0.4.1
+
+Live verification, one field fix that it surfaced, and marketplace installability.
+
+### Fixed
+
+- **Data-dir containment no longer refuses `~/.claude` when `$HOME` is a git
+  repo.** `/supervisor:recap`, `log`, `forget`, and `status` shell out to
+  `supervisorctl` from the model's Bash, which does not receive
+  `CLAUDE_PLUGIN_DATA`; it resolves the canonical `~/.claude/plugins/data/<id>`,
+  and the containment check's "inside any git worktree" clause wrongly matched
+  when the user's home directory is itself a git repo, refusing the plugin's own
+  store. `containment_ok()` (Python) and `sup_dir_contained()` (shell) now exempt
+  `~/.claude/`; the project/cwd refusal is unchanged, and a regression test pins
+  both directions. Found by live smoke testing, which the offline suite could not
+  catch (its tests set `CLAUDE_PLUGIN_DATA` directly, the containment-exempt
+  branch).
+
+### Added
+
+- **Marketplace manifest** (`.claude-plugin/marketplace.json`): the repository is
+  now its own single-plugin marketplace and installs via
+  `/plugin marketplace add Dljdd/agent-session-supervisor`.
+- **CONTRIBUTING.md** and a README "Testing and verification" section documenting
+  the automated suite and the live-smoke results.
+
+### Verified live
+
+Real `claude --plugin-dir` sessions confirmed: start-of-session digest injection
+and model use, `/clear` re-injection, async capture under load, the skills, real
+sleep-prevention, `kill -9` crash recovery, once-only first-run disclosure, the
+auto-resume opt-in safety gate, and the statusline installer. The real 5-hour
+rate-limit resume trigger and interactive `/reload-plugins` remain in
+`docs/MANUAL-SMOKE.md` as environment-bound follow-ups.
+
 ## 0.4.0
 
 Initial build of the Agent Session Supervisor plugin: a zero-token, fully-local
