@@ -72,6 +72,15 @@ def containment_ok(d: str) -> bool:
     for b in bases:
         if rp == b or rp.startswith(b + os.sep):
             return False
+    # The plugin's own canonical data root (~/.claude/plugins/data/...) is a
+    # safe, legitimate location. Exempt anything under ~/.claude from the
+    # git-worktree clause below, so the store is NOT refused when $HOME (or any
+    # ancestor of ~/.claude) is itself a git repo -- e.g. a user who version-
+    # controls their home dotfiles. The CLAUDE_PROJECT_DIR / cwd refusal above
+    # still applies, so a data dir inside the actual project is refused as before.
+    claude_home = os.path.realpath(os.path.join(os.path.expanduser("~"), ".claude"))
+    if rp == claude_home or rp.startswith(claude_home + os.sep):
+        return True
     probe = _existing_ancestor(rp)
     try:
         r = subprocess.run(

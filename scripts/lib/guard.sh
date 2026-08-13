@@ -53,6 +53,14 @@ sup_dir_contained() {
     case "$_ct_raw" in "$_ct_w"|"$_ct_w"/*) return 0 ;; esac
     case "$_ct_res" in "$_ct_w"|"$_ct_w"/*) return 0 ;; esac
   fi
+  # Exempt the plugin's own canonical data root (~/.claude/...) from the
+  # git-worktree clause: it is a safe location and must not be refused just
+  # because $HOME itself is a git repo. Mirrors containment_ok() in the python.
+  if [ -n "${HOME:-}" ]; then
+    _ct_home=$(CDPATH= cd -- "$HOME/.claude" 2>/dev/null && pwd -P) || _ct_home="$HOME/.claude"
+    case "$_ct_raw" in "$_ct_home"|"$_ct_home"/*) return 1 ;; esac
+    case "$_ct_res" in "$_ct_home"|"$_ct_home"/*) return 1 ;; esac
+  fi
   sup_git_owned "$_ct_res" && return 0
   return 1
 }
