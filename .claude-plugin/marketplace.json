@@ -1,0 +1,19 @@
+{
+  "name": "agent-session-supervisor",
+  "metadata": {
+    "description": "One plugin that keeps a Claude Code session continuous: flight recorder + digest, stay-awake, opt-in quota auto-resume, and a cost/quota statusline. Zero model calls, fully local."
+  },
+  "owner": {
+    "name": "Dylan Moraes",
+    "url": "https://github.com/Dljdd"
+  },
+  "plugins": [
+    {
+      "name": "supervisor",
+      "source": "./",
+      "description": "Session flight recorder, stay-awake, quota auto-resume, and cost statusline for Claude Code. Zero model calls, fully local.",
+      "license": "MIT",
+      "keywords": ["session", "memory", "recorder", "resume", "statusline", "sleep"]
+    }
+  ]
+}

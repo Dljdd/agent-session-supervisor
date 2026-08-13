@@ -77,22 +77,22 @@ Recorded state for a `--plugin-dir` session lives under:
 ~/.claude/plugins/data/supervisor-inline/
 ```
 
-### Later: via a plugin marketplace
+### Via a plugin marketplace
 
-Once the plugin is published to a Claude Code marketplace, the standard flow is:
+This repository is its own single-plugin marketplace (`.claude-plugin/marketplace.json`),
+so it installs directly:
 
 ```
-/plugin marketplace add <marketplace-repo-or-url>
-/plugin install supervisor@<marketplace-name>
+/plugin marketplace add Dljdd/agent-session-supervisor
+/plugin install supervisor@agent-session-supervisor
 ```
 
-A marketplace install stores its state under a different id, for example
-`~/.claude/plugins/data/supervisor-<marketplace-name>/`.
+A marketplace install stores its state under
+`~/.claude/plugins/data/supervisor-agent-session-supervisor/`.
 
 > **Dev/install data split.** State does **not** migrate between the
 > `--plugin-dir` (`supervisor-inline`) store and a marketplace store. They are
-> separate histories by design. In this build `--plugin-dir` is the supported
-> install path; the marketplace manifest is a follow-up.
+> separate histories by design.
 
 ---
 
@@ -351,6 +351,59 @@ compatible tool you run alongside the supervisor.
 
 Every hook is built so a missing interpreter or tool can disable a feature but
 can never surface an error into, or add latency to, your session.
+
+---
+
+## Testing and verification
+
+The plugin ships with a self-contained test harness (no framework dependencies)
+and a live smoke checklist. See [CONTRIBUTING.md](CONTRIBUTING.md) for the
+developer loop.
+
+### Automated suite
+
+Run everything from the repository root:
+
+```
+bash tests/run.sh
+```
+
+- **184 unit tests** (`python3 -m unittest`, standard library only) covering the
+  digest builder, the redaction engine (31 secret-vector cases), project-key and
+  containment logic, config, and capture.
+- **50 integration tests** (pure `bash`, macOS `bash 3.2` compatible) that pipe
+  the real hook payload shapes through the actual scripts in throwaway sandboxes:
+  concurrent capture, self-noise exclusion, crash-without-`SessionEnd` rebuild,
+  multi-session interleaving, the auto-resume state machine (with fake shims so no
+  real quota is ever touched), and the statusline installer.
+- A **lint gate** enforcing plugin structure, the hooks manifest, `bash 3.2`
+  portability, and the injection-safety framing of the digest.
+- `claude plugin validate .` passes for both the plugin and the marketplace
+  manifest.
+
+Latest run: **`50 passed, 0 failed, 3 skipped`**. The three skips are performance
+latency gates that measure interpreter startup rather than the plugin; `RELEASE=1`
+promotes any skip to a failure.
+
+### Live verification
+
+Everything that only a real model session can exercise is tracked in
+[`docs/MANUAL-SMOKE.md`](docs/MANUAL-SMOKE.md). Verified in real
+`claude --plugin-dir` sessions for 0.4.1:
+
+| Check | Status |
+|---|---|
+| Start-of-session digest injected and used by the model, with no file reads | verified |
+| `/clear` re-injects; `compact` deliberately does not | verified |
+| Async capture keeps up (35 back-to-back reads, no slowdown) | verified |
+| `/supervisor:recap` and the other skills | verified |
+| Real sleep prevention (`caffeinate` assertion tied to the `claude` process) | verified |
+| Crash recovery: `kill -9`, next start rebuilds the digest (synthetic end) | verified |
+| First-run privacy notice appears once per data dir, then never again | verified |
+| Auto-resume safety: nothing is armed unless you explicitly opt in | verified |
+| Statusline installer: idempotent, backs settings up, never clobbers | verified |
+| A real 5-hour rate-limit resume trigger | pending (needs organic conditions) |
+| Interactive `/reload-plugins`; marketplace-install data split | pending |
 
 ---
 

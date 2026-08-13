@@ -125,8 +125,11 @@ else
   for d in hooks skills scripts; do
     [ -d "$d" ] || lfail L-05 "component dir missing at plugin root: $d/"
   done
-  extra=$(ls -A .claude-plugin 2>/dev/null | grep -v '^plugin\.json$')
-  [ -z "$extra" ] || lfail L-05 ".claude-plugin/ must contain ONLY plugin.json; extras: $extra"
+  # .claude-plugin/ holds only manifests: plugin.json (required) and the optional
+  # marketplace.json (this repo is its own single-plugin marketplace). Component
+  # dirs (hooks/skills/scripts) must be at the plugin root, never in here.
+  extra=$(ls -A .claude-plugin 2>/dev/null | grep -vE '^(plugin|marketplace)\.json$')
+  [ -z "$extra" ] || lfail L-05 ".claude-plugin/ must contain only plugin.json / marketplace.json; extras: $extra"
 fi
 
 # ---------------- L-06: digest header wording (anti-injection, hooks.md:848) ----------------
