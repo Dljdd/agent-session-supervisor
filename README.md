@@ -1,145 +1,379 @@
 # Agent Session Supervisor
-### One Claude Code plugin that does what five separate tools currently do
 
-*Project brief · 28 July 2026*
+A Claude Code plugin that quietly watches your coding sessions and gives you
+back four things: a memory of what the last session actually did, a machine that
+stays awake while a long run is alive, an optional overnight auto-resume after a
+rate limit, and an optional statusline showing cost, context, and quota resets.
 
-Working names: **Sustain**, **Campfire**, **Vigil**, **Keepwarm**. Pick one later.
-
----
-
-## The idea in one paragraph
-
-Five people independently built five small tools in June–July 2026, each patching a different way that a long-running Claude Code session falls apart. Nobody built the thing underneath. This plugin is that thing: **a single install that keeps an agent session alive, cheap, and continuous** — machine stays awake while work is happening, cache doesn't expire during idle gaps, the next session starts knowing what the last one did, and the session picks itself back up when the quota resets.
-
-You're not inventing the ideas. You're consolidating five proven ones into a thing people install once. That's a legitimate product and a much faster path than inventing.
+It makes **zero model calls**, runs **fully local**, never parses your
+transcript, and never stores file contents. Everything it records lives outside
+your repository, redacted before it touches disk.
 
 ---
 
-## The five failures, and who patched each
+## What it does
 
-| Failure mode | Existing tool | Stars | Licence |
-|---|---|---|---|
-| Machine sleeps mid-run | [adrafinil](https://github.com/kageroumado/adrafinil) | 6 | MIT |
-| Cache expires during idle gaps, you pay to rebuild | [claude-thermos](https://github.com/izeigerman/claude-thermos) | 4 | MIT |
-| Next session starts knowing nothing | [Recall](https://github.com/raiyanyahya/recall) | 679 | MIT |
-| Agent re-learns the codebase every session | `coldstart` (Ask HN, July 2026 — no public repo found) | — | — |
-| Session stops and waits for you to type "continue" | session resumption tool (Ask HN, June 2026 — no public repo found) | — | — |
+Four capabilities ship in one plugin. Each degrades to a silent no-op rather than
+ever breaking or slowing your session.
 
-**The number worth noticing:** claude-thermos and adrafinil each hit the HN front page (111 and 124 points, 86 and 78 comments) and have **4 and 6 stars**. Attention did not convert to adoption. People recognise the problem and won't install a point solution for each symptom. That's the argument for one plugin.
+- **v0.1 - Flight recorder + start-of-session digest.** Hooks capture structural
+  signals from tool events (which files were edited, which commands passed or
+  failed, which reads never led to an edit, whether a change was reverted) into
+  an append-only local log. At the next session start it injects a short factual
+  digest (capped at 400 tokens) so the model already knows what mechanically
+  happened last time, without reading a single file.
+
+- **v0.2 - Leak-proof stay-awake.** While a session is alive the machine is kept
+  awake, scoped to the owning `claude` process so the wake lock cannot outlive
+  it. Prefers `adrafinil` when installed (the only option that survives a closed
+  lid), falls back to `caffeinate` on macOS and `systemd-inhibit` on Linux.
+
+- **v0.3 - Opt-in quota auto-resume.** Off by default. When enabled, a
+  `rate_limit` stop schedules a single headless `claude -p --resume` after the
+  quota window resets, so an unattended overnight run picks itself back up.
+
+- **v0.4 - Opt-in cost/quota statusline.** A one-line status showing spend,
+  context use, and rate-limit resets. It also persists the telemetry that the
+  digest cost line and the auto-resume scheduler rely on.
+
+**Non-goals in this build:** no cache warming (see the companion note below), no
+transcript parsing ever, no cloud, no embeddings, no summarization by a model,
+no Windows support, no `bypassPermissions` anywhere.
 
 ---
 
-## Architecture — and a better plan than wrapping
+## Requirements
 
-I pulled the current Claude Code plugin and hooks reference. **Most of this doesn't need wrapping at all — the hook system can do it natively**, which is cleaner and far less brittle than shelling out to five tools.
+- Claude Code 2.1.126 or newer, on macOS or Linux.
+- `python3` (standard library only, no pip) for capture, digest, and resume.
+- `git` is optional: without it the recorder still works and the reverted-change
+  signal is simply skipped.
+- `jq` is optional: it is only a fast path for the statusline; `python3` covers
+  the same job.
 
-### What maps to what
+Windows is not supported; every hook exits cleanly as a no-op there.
 
-| Capability | How to build it |
+---
+
+## Install
+
+### Today: via `--plugin-dir`
+
+From the repository root, or any absolute path to it:
+
+```
+claude --plugin-dir /absolute/path/to/agent-session-supervisor
+```
+
+Then, inside the session, load it:
+
+```
+/reload-plugins
+```
+
+Recorded state for a `--plugin-dir` session lives under:
+
+```
+~/.claude/plugins/data/supervisor-inline/
+```
+
+### Later: via a plugin marketplace
+
+Once the plugin is published to a Claude Code marketplace, the standard flow is:
+
+```
+/plugin marketplace add <marketplace-repo-or-url>
+/plugin install supervisor@<marketplace-name>
+```
+
+A marketplace install stores its state under a different id, for example
+`~/.claude/plugins/data/supervisor-<marketplace-name>/`.
+
+> **Dev/install data split.** State does **not** migrate between the
+> `--plugin-dir` (`supervisor-inline`) store and a marketplace store. They are
+> separate histories by design. In this build `--plugin-dir` is the supported
+> install path; the marketplace manifest is a follow-up.
+
+---
+
+## Commands
+
+All commands live under the `/supervisor:` namespace.
+
+| Command | What it does |
 |---|---|
-| **Memory / continuity** | `PostToolUse` + `PostToolUseFailure` hooks capture structural signals during the session. `SessionStart` hook (matcher `startup\|resume`) injects the digest via `additionalContext`. |
-| **Auto-resume on quota reset** | `StopFailure` hook with matcher `rate_limit`. This event exists specifically for turns that die on API errors — it's the exact hook for this. |
-| **Stay awake while working** | `SessionStart` → acquire, `Stop`/`SessionEnd` → release. adrafinil already ships a CLI (`adrafinil acquire <key> --tool claude-code`) *designed* to be called from hooks, so wrap it when present and fall back to `caffeinate` when not. |
-| **Session cost + what happened** | Statusline receives `cost.total_cost_usd`, `context_window`, `total_lines_added/removed`, and `rate_limits.five_hour.resets_at`. All of it is already handed to you. |
-| **Cache warming** | ⚠️ The hard one — see below. |
+| `/supervisor:recap` | Print the digest of recent sessions in this project. Add `full` for the complete report. |
+| `/supervisor:log` | Print the last raw events (paths, commands, pass/fail). Optional count, default 20. |
+| `/supervisor:forget` | Delete this project's recorded history. Runs a dry-run first and asks before deleting. Add `all` to wipe everything. |
+| `/supervisor:config` | Show or change settings. You type it; the model cannot flip settings on its own. |
+| `/supervisor:statusline` | Install or remove the statusline. Edits `~/.claude/settings.json` only after you approve. Add `remove` to uninstall. |
 
-### The one genuine integration problem
-
-**claude-thermos can't be wrapped by a plugin.** It's a launcher — you run `uvx claude-thermos` *instead of* `claude`, and it proxies the API. A plugin loads inside a session that has already started, so it can't put itself in front of the API.
-
-Two options:
-
-1. **Reimplement warming via hooks.** `SubagentStart` and `SubagentStop` tell you exactly when the main agent goes idle waiting on a subagent — the precise condition thermos watches for. An `async: true` command hook could issue the keepalive request. Needs API credentials, which is a real design decision.
-2. **Ship it as a documented companion.** "Run under thermos for cache warming." Honest, zero effort, weaker product.
-
-**Start with option 2, move to option 1 if people care.** Don't let the hardest piece block v1.
-
-### Storage
-
-Use `${CLAUDE_PLUGIN_DATA}` (→ `~/.claude/plugins/data/{id}/`), **not** `${CLAUDE_PLUGIN_ROOT}`. Plugin root changes on every update; the data dir survives updates and uninstalls.
-
-### Plugin layout
-
-```
-agent-session-supervisor/
-├── .claude-plugin/
-│   └── plugin.json          # manifest — only this file goes in here
-├── hooks/
-│   └── hooks.json           # all hook registrations
-├── scripts/
-│   ├── capture.sh           # PostToolUse / PostToolUseFailure → append signals
-│   ├── digest.py            # build the session digest
-│   ├── inject.sh            # SessionStart → emit additionalContext
-│   ├── awake.sh             # acquire / release
-│   └── resume.sh            # StopFailure(rate_limit) → schedule resume
-├── skills/
-│   └── recap/SKILL.md       # /supervisor:recap — what happened last session
-└── settings.json            # optional statusline
-```
-
-Component directories go at plugin **root**, not inside `.claude-plugin/`. That's the single most common thing that breaks for plugin authors.
+Everything `recap` and `log` print is redacted at capture time and sanitized
+again at print time, then shown as data inside a fenced block; it is never
+treated as instructions.
 
 ---
 
-## The actual differentiator: the session recorder
+## Configuration
 
-**→ Full implementation spec: [`SPEC-01-session-recorder.md`](./SPEC-01-session-recorder.md)**
+Settings live in `config.json` inside the plugin data dir. Change them with
+`/supervisor:config <key> <value>`; read them with `/supervisor:config` (no
+arguments).
 
-A naming note first, because it matters. I called this "memory" earlier and that was wrong — it points people at Supermemory, mem0, Zep and the whole semantic-memory category. **This is not that.** No embeddings, no vector store, no retrieval, no model calls. It's a flight recorder: it logs what mechanically happened to the codebase and hands a short digest to the next session. Closest analogue is `git log` crossed with a build log.
-
-This is the part worth caring about, and it's where you beat Recall rather than repackaging it.
-
-**Recall summarises with TF-IDF + TextRank** — classical algorithms that rank sentences by which words appear most. That surfaces what was *discussed*, not what *mattered*. A session where you burned an hour failing looks much like one where you succeeded immediately.
-
-**Use structural signals instead.** Still zero tokens, still fully local, dramatically better signal:
-
-| Signal | Captured from | Why it matters |
+| Key | Default | Meaning |
 |---|---|---|
-| Files edited, and how many times | `PostToolUse` matcher `Write\|Edit` | Repeated edits = where the difficulty was |
-| Commands that **failed**, with the error | `PostToolUseFailure` matcher `Bash` | The single most useful thing to know next session |
-| Tests red → green (or green → red) | Bash output parsing | Actual progress, not narrated progress |
-| **Written then reverted** | Diff the edit stream | A dead end. Worth more than any summary sentence. |
-| Files read repeatedly, never edited | `PostToolUse` matcher `Read` | Where confusion lived |
+| `capture_reads` | `true` | Record `Read` events (used for "read but never edited"). |
+| `capture_commands` | `true` | Record Bash command strings. When `false`, only failure counts survive, commands hidden. |
+| `capture_subagents` | `true` | Record events that originate inside subagents. |
+| `git_snapshots` | `true` | Take a git snapshot at session start/end (enables the reverted-change signal). |
+| `digest_enabled` | `true` | Inject the start-of-session digest. |
+| `digest_max_tokens` | `400` | Hard cap on the injected digest size. |
+| `awake` | `auto` | Stay-awake mode: `auto`, `adrafinil`, `caffeinate`, `inhibit`, or `off`. |
+| `notify` | `true` | Allow best-effort desktop notifications (macOS). |
+| `telemetry` | `true` | Let the statusline persist cost/rate-limit telemetry. |
+| `debug` | `false` | Write a debug log (see the caveat under Privacy). |
 
-Deterministic, cheap, private, and genuinely more useful than sentence ranking. **Ship this piece standalone first** — it's the highest-value part, the least likely to be commoditised well by the platform, and it works on its own.
+### Protected keys (auto-resume)
 
----
+These keys change behavior that can spend your quota unattended, so the setter
+**refuses them unless you pass `--i-understand-quota-spend`** and prints the
+consequences first. The `/supervisor:config` skill walks you through this and
+asks for an explicit yes in chat.
 
-## Build order
-
-**v0.1 — session recorder only.** Capture hooks, digest builder, `SessionStart` injection, `/recap` skill. Standalone value, no dependencies on the other four tools. **Spec written: [`SPEC-01-session-recorder.md`](./SPEC-01-session-recorder.md).**
-
-**v0.2 — stay awake.** Wrap adrafinil's CLI where present, `caffeinate` fallback. Two hooks, half a day.
-
-**v0.3 — auto-resume.** `StopFailure` + `rate_limit` matcher. Read `rate_limits.*.resets_at` to schedule.
-
-**v0.4 — session report.** Statusline plus an end-of-session summary: cost, files touched, tests fixed, dead ends.
-
-**v0.5 — cache warming.** Only if v0.1–0.4 got users.
-
----
-
-## Honest risks
-
-1. **Anthropic could ship most of this.** Memory, session persistence and resume are natural platform features. Mitigation: the structural-signal memory is a real insight and harder to copy casually; and being the consolidator has value even if individual pieces get absorbed.
-2. **The transcript format is explicitly not a stable API** — it changes between releases. Don't parse `~/.claude/projects/**/*.jsonl` as your primary source. Use hook payloads, which are a supported interface.
-3. **thermos is a launcher, not a library.** Covered above.
-4. **adrafinil is macOS-only and Swift.** Linux and Windows need a different path.
-5. **Secret leakage.** Recall admits redaction is *"best-effort, not a guarantee"* and warns to gitignore its directory. You'll inherit that problem the moment you capture command output. Decide early: store under `${CLAUDE_PLUGIN_DATA}` (outside the repo) rather than in-project.
+| Key | Default | Meaning |
+|---|---|---|
+| `auto_resume` | `false` | Master switch for headless quota resume. |
+| `resume_max_attempts` | `4` | Backoff-ladder attempts before giving up. |
+| `resume_min_gap_hours` | `5` | Minimum gap between successful resumes. |
+| `resume_max_minutes` | `30` | Hard wall-clock bound on one resume attempt. |
+| `resume_extra_args` | `[]` | Extra CLI args for the resume command, validated against a strict whitelist (`--plugin-dir`, `--settings`, `--add-dir`, `--model`, `--fallback-model` only). Anything resembling a permission bypass is rejected. |
 
 ---
 
-## Licence position
+## Privacy and consent
 
-All three public tools are **MIT**, so reuse, modification and commercial use are all permitted, provided you retain the copyright notice and licence text.
+The recorder is **on by default**. The first time it writes to a fresh data dir
+it injects a one-time notice into the session telling you exactly what it records
+and how to adjust or erase it.
 
-Attribute properly anyway — credit them in the README by name and link. This is a small community, these are individual authors, and being the person who consolidated their work generously is worth more than the code you'd save by not saying so.
+### What is captured
+
+- **Event kinds only:** file paths that were edited or read, command strings
+  (redacted), pass/fail booleans, error strings (redacted, truncated), and
+  session boundary markers.
+- **Git snapshots** at session start and end carry only: the repo root, the HEAD
+  commit, counts of dirty and untracked files, and 12-character SHA-256 hashes of
+  the repo-relative paths that changed. Real untracked filenames never reach the
+  store. This is what powers the reverted-change signal without ever recording a
+  private filename like `.env.production` in plaintext.
+
+### What is never captured
+
+- File contents. Ever.
+- The transcript (`transcript_path` JSONL) is never read or parsed.
+- Command stdout beyond a redacted error string.
+
+### Turning capture down or off
+
+Use `/supervisor:config` to narrow or disable what is recorded:
+`capture_commands false` hides command strings, `capture_reads false` stops read
+tracking, `capture_subagents false` drops subagent events, `git_snapshots false`
+turns off the reverted-change signal, and `digest_enabled false` stops the
+start-of-session injection. To stop recording a project entirely, use
+`/supervisor:forget` (per project) or `/supervisor:forget all` (everything).
+
+### Redaction
+
+Every stored string is scrubbed **before** it is written to disk, by a
+deterministic, layered engine: private keys, JWTs, provider API keys (Anthropic,
+OpenAI, Stripe, Slack, SendGrid, GitHub, GitLab, HuggingFace, DigitalOcean, AWS,
+and more), `Bearer` tokens, URL credentials, `KEY=value` secret shapes
+(including `DB_PASSWORD=...`, `AWS_SECRET_ACCESS_KEY=...`), and high-entropy
+tokens. All-hex tokens of 32+ characters are redacted, **except** those exactly
+40 or 64 characters long, which are kept because they are git SHA-1/SHA-256
+hashes and keeping them makes command history readable. If the redactor ever
+errors on a field, that whole field is stored as `[redaction-error]` (fail
+closed, secret never written).
+
+Redaction is layered and deterministic. It is not a guarantee. We enumerate the
+layers and ship executable secret-vector tests rather than claim perfection.
+
+### Where it lives, and permissions
+
+State lives **outside your repository**, under the plugin data dir (see Install).
+Every directory is created `0700`, every file `0600`. The plugin refuses to place
+its store inside your project directory, your current working directory, or any
+git worktree, so nothing secret-bearing can be committed by accident.
+
+### Erasing history
+
+`/supervisor:forget` shows a dry-run of exactly what will be deleted (and what
+will not: account-scoped rate-limit telemetry and other projects) and waits for
+your explicit yes. It then deletes this project's events, digests, reports, its
+telemetry rows, ledger entries, pending resume timers, and wake locks, and
+truncates the debug log. `/supervisor:forget all` removes the entire data dir.
+
+### Uninstall
+
+The data dir persists across plugin **updates**. Uninstalling the plugin from its
+last scope **deletes the data dir by default**; pass
+`claude plugin uninstall supervisor --keep-data` (or choose keep-data in the
+`/plugin` UI) to retain it.
+
+### Debug log caveat
+
+When `debug: true`, raw third-party stderr (git output, tracebacks) can land in
+`logs/debug.log` **unredacted**, because shell-level stderr cannot pass through
+the Python redactor. It is off by default, written `0600`, truncated at 1 MB, and
+wiped by `/supervisor:forget`. The plugin's own Python debug lines are redacted.
 
 ---
 
-## Open questions before you start
+## Stay awake (v0.2)
 
-- Does `coldstart` have a public repo? I couldn't find one — it was only mentioned in the Ask HN thread.
-- Same for the session-resumption tool.
-- Does the plugin need API credentials for cache warming, and do you want that responsibility in v1? (Suggested answer: no.)
-- Does this work for Codex/Cursor too, or is Claude Code-only the right v1 scope? (Suggested answer: Claude Code only — the hook system is what makes it feasible.)
+While a session is alive, the machine is kept awake and the lock is scoped to the
+owning `claude` process, so it cannot leak past the session:
+
+- **adrafinil** (preferred when installed): the only option here that keeps a run
+  going with the **lid closed**.
+- **caffeinate** (macOS fallback): launched as `caffeinate -ims -w <claude-pid>`,
+  detached into its own session so a hook timeout or terminal signal cannot reap
+  it, and it exits the instant the `claude` process dies. Note: `caffeinate -ims`
+  prevents idle, system, and disk sleep on AC power; it does **not** prevent
+  lid-close sleep. That gap is exactly what adrafinil covers.
+- **systemd-inhibit** (Linux fallback): an inhibitor tied to the `claude` pid.
+
+A sweep at every session start cleans up any lock whose `claude` process is gone,
+verifying the holder by command name so a recycled PID is never signalled.
+
+---
+
+## Auto-resume (v0.3)
+
+> **Read this before enabling.** Auto-resume is **off by default** on purpose.
+
+When enabled, hitting a rate limit schedules a single headless
+`claude -p --resume` shortly after the quota window resets. This is the
+walk-away overnight-run feature, and only that:
+
+- **It spends your quota with nobody watching.** That is the whole point, and the
+  reason it is opt-in.
+- **It never types into your live terminal.** A hook has no controlling TTY, so
+  auto-resume never continues your interactive REPL. If the interactive `claude`
+  that hit the limit is still alive when the timer fires, the scheduler does
+  **not** resume (it would fork history under you); it sends a notification and
+  exits. It fully helps only the unattended case: a closed terminal or a `-p`
+  run.
+- **You are told when a resume is armed.** A desktop notification names the
+  session and the approximate resume time, and how to cancel.
+- **It cannot storm.** At most one resume timer is armed globally, at most one
+  successful resume happens per quota window, and each attempt is bounded by
+  `resume_max_minutes` of wall-clock time, so a hung `claude -p` is killed rather
+  than blocking forever.
+
+### Four ways to stop it
+
+1. `/supervisor:config auto_resume false`
+2. `touch <data-dir>/resume/DISABLED` (a kill-switch marker; presence blocks all resumes)
+3. `kill <pid>` from any `resume/pending/*.json` file
+4. Launch with `SUPERVISOR_DISABLE=1` to prevent scheduling entirely
+
+### Known unknown
+
+Claude Code shows a "Resume from summary / as-is / don't ask" dialog for Pro/Max
+sessions that have been inactive for more than about an hour with large context,
+which is exactly the post-reset situation. Its behavior under `claude -p` is not
+yet documented or verified. The `resume_max_minutes` bound contains any blocking,
+but this is confirmed only in the live smoke checklist
+(`docs/MANUAL-SMOKE.md`, step 7). Enable auto-resume with that caveat in mind.
+
+To enable: `/supervisor:config auto_resume true` (it will show the consequences
+and ask you to confirm).
+
+---
+
+## Statusline (v0.4)
+
+`/supervisor:statusline` installs a one-line status via a consent flow. A plugin
+cannot contribute the main statusline on its own, so the skill edits
+`~/.claude/settings.json` for you, but only after showing you the exact change
+and getting an explicit yes. All file mechanics run inside a dedicated installer
+that backs up your settings, makes a minimal edit, verifies the result parses,
+and writes atomically; the model never hand-edits the file.
+
+The rendered line looks like:
+
+```
+$0.42 · ctx 34% · 5h 62% ↺14:30 · 7d 18% · +120/-14
+```
+
+That is spend, context used, the 5-hour and 7-day quota windows with their reset
+times, and lines added/removed. Segments with no data (for example, rate limits
+on a non-Pro/Max account) are omitted.
+
+The installed copy is fully self-contained with its data dir baked in, so it
+keeps working across plugin updates. It also persists telemetry (cost and
+rate-limit resets) into the plugin data dir, which is what feeds the digest cost
+line and powers auto-resume scheduling. `/supervisor:statusline remove` restores
+your previous statusline.
+
+---
+
+## Companion: cache warming with claude-thermos
+
+This plugin does **not** warm the prompt cache (that needs API credentials and is
+parked for a future version). If you want to keep the cache warm across idle gaps
+during a long run, it composes cleanly with
+[claude-thermos](https://github.com/izeigerman/claude-thermos): run your session
+under it, for example
+
+```
+uvx claude-thermos
+```
+
+Nothing from claude-thermos is wrapped or bundled here; it is a separate,
+compatible tool you run alongside the supervisor.
+
+---
+
+## Platform and degradation matrix
+
+| Situation | Recorder | Awake | Resume | Statusline |
+|---|---|---|---|---|
+| macOS, full toolchain | full | adrafinil, else `caffeinate -ims -w` | full (opt-in) | full |
+| Linux | full | `systemd-inhibit`, else no-op | full, minus desktop notify | full |
+| Windows | no-op (unsupported) | no-op | no-op | not offered |
+| Non-git project | full; reverted-change signal skipped | unaffected | unaffected | unaffected |
+| `python3` absent | recorder/digest silently off | works (pure shell) | scheduling disabled | jq path works, telemetry off |
+| `jq` absent | unaffected | unaffected | unaffected | python3 fallback |
+| Plugin data dir unset (not a real hook) | hooks no-op, zero writes | no-op | no-op | resolves via baked dir |
+| `disableAllHooks: true` | everything off | off | off | off |
+
+Every hook is built so a missing interpreter or tool can disable a feature but
+can never surface an error into, or add latency to, your session.
+
+---
+
+## Attribution
+
+This plugin was designed with lessons from three MIT-licensed projects. **No
+source code from any of them is included.** If any is ever vendored, its MIT
+copyright notice moves into a `NOTICE` file alongside this one.
+
+- **Recall** - raiyanyahya, <https://github.com/raiyanyahya/recall> (MIT).
+  Credited for the zero-token, fully-local principle and the lesson of keeping
+  the store outside the repository. Its model-summarization approach was
+  deliberately replaced here with structural signals.
+- **claude-thermos** - izeigerman, <https://github.com/izeigerman/claude-thermos>
+  (MIT). Credited for identifying the cache-TTL failure and the `max_tokens: 1`
+  keepalive technique. Documented above as a compatible companion; nothing is
+  wrapped in v0.1-v0.4.
+- **adrafinil** - kageroumado, <https://github.com/kageroumado/adrafinil> (MIT).
+  Wrapped through its public CLI exactly as documented; no code copied.
+  Recommended for lid-closed operation.
+
+---
+
+## License
+
+MIT, Copyright (c) 2026 Dylan Moraes. See [LICENSE](LICENSE).
